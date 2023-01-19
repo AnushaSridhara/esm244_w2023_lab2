@@ -1,0 +1,206 @@
+---
+title: "ESM 244 Lab 2"
+author: "Anusha Sridhara"
+date: '2023-01-19'
+output: html_document
+---
+
+```{r setup, include=TRUE, warning=FALSE, echo=TRUE, message=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message=FALSE, warning=FALSE)
+library(tidyverse)
+library(palmerpenguins)
+library(AICcmodavg)
+library(equatiomatic)
+```
+
+# Predicting penguin mass
+We want to create a model we can use in the field to quickly and easily estimate a penguin's mass, based on the subset of data in the `palmerpenguins` package.
+```{r}
+penguins_clean <- penguins %>%
+  drop_na() %>%
+  rename(mass = body_mass_g,
+         bill_l = bill_length_mm,
+         bill_d = bill_depth_mm,
+         flip_l = flipper_length_mm)
+
+mdl1 <- lm(mass ~ bill_l + bill_d + flip_l + species + sex + island, 
+                  data = penguins_clean) # creating a model for mass as a function of bill length + bill depth + flip length etc
+#summary
+#residuals - how far is each point from predictive value
+#p values - this model is good at predicting - low p value
+#for every mm of bill length, 18 units of bill length is added is the way to interpret
+# residual std error - degrees of freedom
+
+
+AIC(mdl1)
+BIC(mdl1)
+
+```
+R has the ability to recognize a formula to be used in modeling... let's take advantage of that!
+```{r}
+f1 <- mass ~ bill_l + bill_d + flip_l + species + sex + island
+# class(f1) - f1 works like a formula
+
+mdl1 <- lm(f1, data = penguins_clean) # same model as before
+
+f2 <- mass ~ bill_l + bill_d + flip_l + species + sex
+mdl2 <- lm(f2, data = penguins_clean)
+
+summary(mdl2)
+AIC(mdl2)
+BIC(mdl2)
+
+AIC(mdl1, mdl2)
+
+f3 <- mass ~ bill_d + flip_l + species + sex
+mdl3 <- lm(f3, data = penguins_clean)
+summary(mdl3)
+AIC(mdl1, mdl2, mdl3)
+BIC(mdl1, mdl2, mdl3)  # AIC and BIC are used for comparison
+```
+
+These models all look pretty good!  All the adjusted R^2^ indicate that any of these models explains around 87% of the observed variance.  Benefits and drawbacks to each?
+
+Let's compare these models using AIC: Akaike Information Criteria - calculated from:
+
+* the number of independent variables included in the model
+* the degree to which the model fits the data
+
+AIC identifies the model that maximizes the likelihood of those parameter values given these data, using the fewest possible independent variables - penalizes overly complex models.  A lower score is better; a difference of 2 indicates a significant difference in model fit.
+
+```{r}
+AIC(mdl1, mdl2, mdl3) 
+BIC(mdl1, mdl2, mdl3) 
+
+AICcmodavg::AICc(mdl1)
+
+aictab(list(mdl1, mdl2, mdl3))
+bictab(list(mdl1, mdl2, mdl3))
+```
+
+From this we can see the second model is "best" by dropping info about the island (which requires 2 parameters!).   However, the first model, even with the penalty, is slightly better (though not significantly!) than model 3.
+
+But: this model is based on how well it fits the existing data set.  We want a model that will perform well in predicting data outside of the dataset used to create the model!  Here we will use a common tool in supervised machine learning - separating our data into a training dataset, to tune the parameters of the competing models, and a testing dataset to see how how well the models predict unseen data.
+
+```{r}
+folds <- 10
+fold_vec <- rep(1:folds, length.out = nrow(penguins_clean)) # rep is repeat 1 thru 10; 
+
+set.seed(42) ### good idea for random numbers or sampling 
+penguins_fold <- penguins_clean %>%
+  mutate(group = sample(fold_vec, size = n(), replace = FALSE))#group is a new variable being created
+
+table(penguins_fold$group)
+
+### first fold
+test_df <- penguins_fold %>%
+  filter(group == 1)
+train_df <- penguins_fold %>%
+  filter(group != 1)
+```
+
+Write a quick function to calculate the root-mean-square error, which we can use to see which model predicts better.
+
+Root - Mean - Square - Error
+```{r}
+calc_rmse <- function(x, y) {
+  rmse <- (x - y)^2 %>% 
+    mean() %>% 
+    sqrt()
+  return(rmse)
+}
+```
+
+Use the training dataset to create two linear models, based on models 1 and 3 from earlier.
+```{r}
+training_lm1 <- lm(f1, data = train_df)
+summary(training_lm1)
+
+training_lm2 <- lm(f2, data = train_df)
+summary(training_lm2)
+
+training_lm3 <- lm(f3, data = train_df)
+summary(training_lm3)
+```
+
+Now use these models to predict the mass of penguins in our testing dataset, then use our RMSE function to see how well the predictions went.
+```{r}
+predict_test <- test_df %>%
+  mutate(model1 = predict(training_lm1, test_df),
+         model2 = predict(training_lm2, test_df),
+         model3 = predict(training_lm3, test_df))
+
+rmse_predict_test <- predict_test %>%
+  summarize(rmse_mdl1 = calc_rmse(model1, mass),
+            rmse_mdl2 = calc_rmse(model2, mass),
+            rmse_mdl3 = calc_rmse(model3, mass))
+
+rmse_predict_test
+```
+
+Quite a difference, and generally agrees with the AIC results.
+
+But now, let's up the game to K-fold cross validation.  We already assigned 10 groups, so we will do 5-fold cross validation.  Let's iterate for each group to have a turn being the testing data, using the other groups as training.
+```{r}
+rmse_df <- data.frame()
+
+for(i in 1:folds) {
+  # i <- 1
+  kfold_test_df <- penguins_fold %>% # for test model
+    filter(group == i)
+  kfold_train_df <- penguins_fold %>% # for train model 
+    filter(group != i)
+  
+  kfold_lm1 <- lm(f1, data = kfold_train_df)
+  kfold_lm2 <- lm(f2, data = kfold_train_df)
+  kfold_lm3 <- lm(f3, data = kfold_train_df)
+  
+  ### NOTE: we can use a '.' to indicate the object piped into this
+  ### function.  This is a handy shortcut for tidyverse stuff, but could
+  ### also just call the object itself.
+  kfold_pred_df <- kfold_test_df %>%
+    mutate(mdl1 = predict(kfold_lm1, kfold_test_df),
+           mdl2 = predict(kfold_lm2, .),
+           mdl3 = predict(kfold_lm3, .))
+  kfold_rmse <- kfold_pred_df %>%
+    summarize(rmse_mdl1 = calc_rmse(mdl1, mass),
+              rmse_mdl2 = calc_rmse(mdl2, mass),
+              rmse_mdl3 = calc_rmse(mdl3, mass),
+              test_gp = i)
+  
+  rmse_df <- bind_rows(rmse_df, kfold_rmse)
+}
+
+rmse_df
+
+rmse_df %>% 
+  summarize(mean_rmse_mdl1 = mean(rmse_mdl1),
+            mean_rmse_mdl2 = mean(rmse_mdl2),
+            mean_rmse_mdl3 = mean(rmse_mdl3))
+```
+
+Here we see that model 3 does a slightly better job of predicting body mass (lower error) than model 2.  For our purposes, prediction of unseen data is more important than fitting to already-seen data.
+
+# Once a model is chosen, use the whole dataset to parameterize
+
+Here the various models are very close in performance.  Which to use?  AIC and cross-validation both indicate model 2, though this isn't always the case.  If you're using your model to predict on new data, CV is probably the better way to go, though if your data set is small, AIC is probably better.
+
+So we will use the entire dataset, rather than testing/training sets, to identify the coefficients for the final predictive model, based on model 2.  We already did this earlier, but let's do it again just to make the point.
+```{r}
+final_mdl <- lm(f2, data = penguins_clean)
+summary(final_mdl)
+```
+
+```{r}
+#Our final model:
+`r equatiomatic::extract_eq(final_mdl, wrap = TRUE)`
+
+#and with coefficients in place:
+`r equatiomatic::extract_eq(final_mdl, wrap = TRUE, use_coefs = TRUE)`
+```
+
+
+
+
+
+
